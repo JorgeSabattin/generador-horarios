@@ -337,7 +337,10 @@ let activeTab = 0;
 // PARSEO DE ARCHIVOS
 // ============================================================
 function sheetToObjects(ws){
-  return XLSX.utils.sheet_to_json(ws, {defval:"", raw:false});
+  // raw:true -> usa el valor real de cada celda (v), no el texto formateado (w).
+  // Evita que columnas numéricas como CUPOS (o módulos DESDE/HASTA) salgan como
+  // fechas cacheadas tipo "20/01/1900" cuando el export las formatea como fecha serial.
+  return XLSX.utils.sheet_to_json(ws, {defval:"", raw:true});
 }
 
 function parseDataFile(wb){
@@ -354,31 +357,56 @@ function parseDataFile(wb){
 }
 
 function parseMallaFile(wb){
-  let ws=null;
+  // Devuelve siempre { CODIGO_CURSO -> semestreInt }.
+  // Soporta el formato estándar nuevo (agrupado por bloques de semestre, p.ej.
+  // "2210-1SEM - 1SEM-ING CIVIL INFORMÁTICA" + encabezado "Asignatura" + filas de curso)
+  // y, por compatibilidad, el formato antiguo (col A = semestre, col B = código).
+  const aoaDe = sn => XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, defval:"", raw:true});
+  const reSemBloque = /(\d+)\s*SEM\b/i;                                   // "1SEM", "10SEM"
+  const esCodigo = v => /^[A-Za-zÁÉÍÓÚÑ]{2,6}\d{2,5}[A-Za-z]?$/.test(String(v||"").trim());
+
+  let ws=null, aoa=null;
+
+  // 1) Formato nuevo: alguna hoja con bloques de semestre en la primera columna
   for(const sn of wb.SheetNames){
-    if(sn.toUpperCase().includes("MALLA")){ ws=wb.Sheets[sn]; break; }
+    const a = aoaDe(sn);
+    if(a.some(r => reSemBloque.test(String(r[0]||"")))){ ws=sn; aoa=a; break; }
   }
+  // 2) Formato antiguo: encabezados Semestre / Código
   if(!ws){
-    // intenta detectar por encabezados
     for(const sn of wb.SheetNames){
-      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, defval:""});
-      const hdr = (aoa[0]||[]).map(x=>norm(x));
-      if(hdr.includes("SEMESTRE") && (hdr.includes("CODIGO")||hdr.includes("CÓDIGO"))){ ws=wb.Sheets[sn]; break; }
+      const a = aoaDe(sn);
+      const hdr = (a[0]||[]).map(x=>norm(x));
+      if(hdr.includes("SEMESTRE") && (hdr.includes("CODIGO")||hdr.includes("CÓDIGO"))){ ws=sn; aoa=a; break; }
     }
   }
-  if(!ws) throw new Error("La malla no tiene una hoja reconocible (Semestre / Código / Asignatura).");
-  const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
+  // 3) Por nombre de hoja, o la primera como último recurso
+  if(!ws){ for(const sn of wb.SheetNames){ if(sn.toUpperCase().includes("MALLA")){ ws=sn; break; } } }
+  if(!ws) ws = wb.SheetNames[0];
+  if(!aoa) aoa = aoaDe(ws);
+  if(!aoa || !aoa.length) throw new Error("La malla está vacía o no es legible.");
+
   const map = {};
+
+  // Formato nuevo (agrupado por bloques de semestre)
+  if(aoa.some(r => reSemBloque.test(String(r[0]||"")))){
+    let curSem = null;
+    for(const r of aoa){
+      const a = String(r[0]||"").trim();
+      const b = String(r[1]||"").trim();              // nombre de la asignatura
+      const m = a.match(reSemBloque);
+      if(m){ curSem = parseInt(m[1],10); continue; }   // encabezado de bloque
+      if(curSem!=null && b && esCodigo(a)) map[a.toUpperCase()] = curSem;  // fila de curso
+    }
+    return map;
+  }
+
+  // Formato antiguo: col A = semestre, col B = código
   let curSem = null;
   for(let i=1;i<aoa.length;i++){
     const semRaw = aoa[i][0], cod = aoa[i][1];
-    if(semRaw){
-      const m = String(semRaw).match(/(\d+)/);
-      if(m) curSem = parseInt(m[1],10);
-    }
-    if(cod && String(cod).trim()){
-      map[String(cod).trim().toUpperCase()] = curSem;
-    }
+    if(semRaw){ const m = String(semRaw).match(/(\d+)/); if(m) curSem = parseInt(m[1],10); }
+    if(cod && String(cod).trim()) map[String(cod).trim().toUpperCase()] = curSem;
   }
   return map;
 }
