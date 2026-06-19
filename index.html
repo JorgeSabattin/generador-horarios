@@ -106,6 +106,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   .titles h1{font-size:20px;font-weight:700;letter-spacing:.2px;color:#26241f}
   .titles p{color:var(--muted);font-size:12.5px;margin-top:2px}
   .titles b{color:var(--teal-d);font-weight:600}
+  .usecount{
+    margin-left:auto;display:inline-flex;align-items:center;gap:7px;
+    background:var(--surface);border:1px solid var(--border2);border-radius:20px;
+    padding:6px 14px;font-size:12.5px;color:var(--muted);font-weight:600;white-space:nowrap;
+  }
+  .usecount b{color:var(--teal-d);font-weight:700}
+  .usecount svg{width:14px;height:14px;stroke:var(--teal);fill:none;stroke-width:2}
+  @media(max-width:760px){.usecount{margin-left:0;margin-top:6px}}
 
   .card{
     background:var(--surface);border:1px solid var(--border);
@@ -179,6 +187,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   .legend .it{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text)}
   .legend .sw{width:11px;height:11px;border-radius:3px;flex:0 0 auto}
   .legend .it .sem{color:var(--faint);font-size:11px}
+  .legend .it .vac{color:var(--teal-d);font-size:11px;font-weight:600;cursor:help}
 
   .grid-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)}
   table.grid{border-collapse:collapse;width:100%;min-width:920px;background:var(--surface)}
@@ -226,6 +235,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     <div class="titles">
       <h1>Generador de Horarios</h1>
       <p>Carga el archivo de datos y la malla, elige <b>programa</b> y <b>semestre</b>, y arma horarios sin topes.</p>
+    </div>
+    <div class="usecount" id="useCount" title="Veces que se han generado horarios (total de todos los usuarios)" style="display:none">
+      <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+      Usado <b>—</b> veces
     </div>
   </header>
 
@@ -629,6 +642,69 @@ function generarHorariosAlumno(filas){
 }
 
 // ============================================================
+// VACANTES SIN TOPE POR ASIGNATURA
+// ============================================================
+// Para cada asignatura, suma los cupos de las secciones (NRC) que pueden formar
+// parte de algún horario completo sin topes; es decir, las que caben junto con
+// una combinación válida de las demás asignaturas del semestre. Las secciones
+// que chocan en todos los horarios posibles quedan excluidas.
+function cuposDeNrc(filas){
+  const m = {};
+  for(const r of filas){
+    const n = String(r.NRC||"").trim();
+    if(n && !(n in m)){ const c = parseInt(String(r.CUPOS||"").trim(),10); m[n] = isNaN(c)?0:c; }
+  }
+  return m;
+}
+function vacantesSinTope(filas){
+  const cupos      = cuposDeNrc(filas);
+  const secciones  = construirSecciones(filas);          // solo secciones con horario
+  const opciones   = opcionesPorCurso(secciones);
+  const cursosSlot = Object.keys(opciones).filter(c=>opciones[c].length>0);
+
+  // ¿existe un horario completo sin topes donde `curso` use una opción que cumpla `pred`?
+  function existe(curso, pred){
+    function bt(i, usados){
+      if(i===cursosSlot.length) return true;
+      const c = cursosSlot[i];
+      let opts = opciones[c];
+      if(c===curso){ opts = opts.filter(pred); if(!opts.length) return false; }
+      for(const op of opts){
+        if(disjoint(op.slots, usados)) continue;   // disjoint()==true => se solapan
+        const nu = new Set(usados); op.slots.forEach(x=>nu.add(x));
+        if(bt(i+1, nu)) return true;
+      }
+      return false;
+    }
+    return bt(0, new Set());
+  }
+
+  // NRC por curso desde las filas (incluye secciones sin horario, p.ej. asíncronas)
+  const nrcsPorCurso = {}, slotsNrc = {};
+  for(const r of filas){
+    const curso = String(r.CURSO||"").trim(), nrc = String(r.NRC||"").trim();
+    if(!curso || !nrc) continue;
+    (nrcsPorCurso[curso] = nrcsPorCurso[curso] || new Set()).add(nrc);
+  }
+  for(const s of secciones) slotsNrc[s.nrc] = s.slots.size;
+
+  const out = {};
+  for(const [curso, nrcSet] of Object.entries(nrcsPorCurso)){
+    let total = 0;
+    const slotted = cursosSlot.includes(curso);
+    for(const nrc of nrcSet){
+      let cabe;
+      if(!slotted)              cabe = true;   // asignatura sin horario: nunca choca
+      else if(!slotsNrc[nrc])   cabe = true;   // sección sin horario: no puede chocar
+      else                      cabe = existe(curso, op=>op.secs.some(s=>s.nrc===nrc));
+      if(cabe) total += (cupos[nrc]||0);
+    }
+    out[curso] = total;
+  }
+  return out;
+}
+
+// ============================================================
 // COLORES
 // ============================================================
 function colorDe(codigo){
@@ -681,11 +757,14 @@ function renderLegend(filas){
     if(!c) continue;
     if(!set[c]) set[c] = {nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?MALLA[c.toUpperCase()]:null};
   }
+  const vac = vacantesSinTope(filas);
   const host = document.getElementById("legend");
   host.innerHTML = Object.entries(set).sort((a,b)=>a[0].localeCompare(b[0])).map(([c,info])=>{
     const col = colorDe(c);
     const sem = info.sem!=null ? `<span class="sem">· ${info.sem}°</span>` : "";
-    return `<span class="it"><span class="sw" style="background:${col}"></span><b>${c}</b> ${escapeHtml(info.nombre)} ${sem}</span>`;
+    const n = vac[c]||0;
+    const v = `<span class="vac" title="Cupos de las secciones que caben sin chocar con las otras asignaturas del semestre">· ${n} vac. sin tope</span>`;
+    return `<span class="it"><span class="sw" style="background:${col}"></span><b>${c}</b> ${escapeHtml(info.nombre)} ${sem} ${v}</span>`;
   }).join("");
 }
 
@@ -819,6 +898,38 @@ async function exportarExcel(){
 }
 
 // ============================================================
+// CONTADOR GLOBAL DE USO  (servicio externo gratuito, sin registro)
+// ============================================================
+// Cuenta cuántas veces se han generado horarios sumando los usos de TODAS las
+// personas, sobre una clave pública en countapi.mileshilliard.com (sin API key).
+// Si no hay red o el servicio falla, el chip simplemente no se muestra y la app
+// sigue funcionando con normalidad.
+const COUNTER_KEY  = "jorgesabattin_generador_horarios_v1";
+const COUNTER_BASE = "https://countapi.mileshilliard.com/api/v1";
+
+function pintarContador(value){
+  const el = document.getElementById("useCount");
+  if(!el) return;
+  if(value==null){ el.style.display="none"; return; }
+  const n = Number(value);
+  el.querySelector("b").textContent = isNaN(n) ? value : n.toLocaleString("es-CL");
+  el.style.display = "inline-flex";
+}
+async function cargarContador(){           // lee el total sin incrementar (al abrir)
+  try{
+    const r = await fetch(`${COUNTER_BASE}/get/${COUNTER_KEY}`);
+    if(r.ok){ const d = await r.json(); pintarContador(d.value); }
+    else { pintarContador(0); }            // 404: la clave aún no existe -> 0
+  }catch(e){ pintarContador(null); }        // sin red: ocultar el chip
+}
+async function sumarContador(){            // +1 al generar horarios
+  try{
+    const r = await fetch(`${COUNTER_BASE}/hit/${COUNTER_KEY}`);
+    if(r.ok){ const d = await r.json(); pintarContador(d.value); }
+  }catch(e){ /* sin red: no romper la app */ }
+}
+
+// ============================================================
 // FLUJO PRINCIPAL
 // ============================================================
 function generar(){
@@ -882,6 +993,7 @@ function generar(){
         ? `Listo: ${nCursos} curso(s), ${horarios.length} horario(s) de alumno generado(s).`
         : `Listo: horario completo de ${nCursos} curso(s).`;
       toast("Horarios generados.");
+      sumarContador();
     }catch(e){
       hint.textContent = "Error: "+e.message;
       hint.classList.add("err");
@@ -978,6 +1090,7 @@ setupDrop("dropMalla","fileMalla", async file=>{
 document.getElementById("selProg").onchange = poblarSemestres;
 document.getElementById("btnGen").onclick = generar;
 document.getElementById("btnExport").onclick = exportarExcel;
+cargarContador();
 let stimer;
 document.getElementById("search").oninput = ()=>{ clearTimeout(stimer); stimer=setTimeout(aplicarBusqueda,120); };
 
